@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 from langfuse import Langfuse
 from langfuse.openai import OpenAI as LangfuseOpenAI
 
-# ====== Model / ML ======
-from pycaret.regression import load_model as pyc_load
+# ====== Model (scikit-learn + joblib zamiast PyCaret) ======
+import joblib
 
 # ====== S3 (DigitalOcean Spaces) ======
 import boto3
@@ -42,7 +42,7 @@ client = LangfuseOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # 1. DigitalOcean Spaces (S3)
 # =======================================
 BUCKET_NAME = "maraton"
-MODEL_S3_KEY = "models/model_polmaraton_splity.pkl"  # Ścieżka w S3
+MODEL_S3_KEY = "models/model_polmaraton_splity.joblib"  # teraz .joblib
 
 s3 = boto3.client(
     "s3",
@@ -58,78 +58,56 @@ s3 = boto3.client(
 # =======================================
 def download_model_from_s3():
     """
-    Pobiera model z S3 i zapisuje w lokalnym katalogu tymczasowym.
-    Zwraca ścieżkę do pobranego pliku (bez .pkl).
+    Pobiera model z S3 i zapisuje go lokalnie (format joblib).
+    Zwraca pełną ścieżkę do pliku .joblib
     """
     try:
-        # Utwórz katalog tymczasowy
         temp_dir = tempfile.gettempdir()
-        local_model_dir = os.path.join(temp_dir, "pycaret_models")
+        local_model_dir = os.path.join(temp_dir, "models")
         os.makedirs(local_model_dir, exist_ok=True)
-        
-        # Ścieżka lokalna (z .pkl)
-        local_model_path = os.path.join(local_model_dir, "model_polmaraton_splity.pkl")
-        
-        # Sprawdź czy model już istnieje lokalnie
+
+        local_model_path = os.path.join(local_model_dir, "model_polmaraton_splity.joblib")
+
+        # jeśli już istnieje — nie pobieraj drugi raz
         if os.path.exists(local_model_path):
-            print(f"✔ Model już istnieje lokalnie: {local_model_path}")
-            # Zwróć ścieżkę BEZ .pkl (PyCaret tego wymaga)
-            return local_model_path.replace(".pkl", "")
-        
-        # Pobierz z S3
+            print("✔ Model już istnieje lokalnie")
+            return local_model_path
+
         print(f"📥 Pobieram model z S3: {BUCKET_NAME}/{MODEL_S3_KEY}")
         s3.download_file(BUCKET_NAME, MODEL_S3_KEY, local_model_path)
         print(f"✔ Model pobrany do: {local_model_path}")
-        
-        # Zwróć ścieżkę BEZ .pkl (PyCaret tego wymaga)
-        return local_model_path.replace(".pkl", "")
-        
-    except NoCredentialsError:
-        st.error("❌ Błąd: Brak danych uwierzytelniających do S3")
-        return None
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == 'NoSuchKey':
-            st.error(f"❌ Błąd: Model nie istnieje w S3: {MODEL_S3_KEY}")
-        else:
-            st.error(f"❌ Błąd S3: {str(e)}")
-        return None
+
+        return local_model_path
+
     except Exception as e:
         st.error(f"❌ Błąd pobierania modelu: {str(e)}")
         return None
 
 
 # =======================================
-# 3. Load Model (from S3 or local)
+# 3. Load model (joblib + sklearn)
 # =======================================
 @st.cache_resource
 def load_model():
     """
-    Wczytuje model PyCaret:
-    1. Najpierw próbuje z lokalnego katalogu ./models/
-    2. Jeśli nie ma lokalnie, pobiera z S3
+    Wczytuje model w formacie .joblib
     """
-    LOCAL_MODEL_NAME = "models/model_polmaraton_splity"
-    
-    # Sprawdź czy model istnieje lokalnie (np. w repo)
-    if os.path.exists(f"{LOCAL_MODEL_NAME}.pkl"):
+    LOCAL_PATH = "models/model_polmaraton_splity.joblib"
+
+    # 1. Najpierw próbuj wczytać lokalnie (repozytorium)
+    if os.path.exists(LOCAL_PATH):
         try:
-            print(f"✔ Wczytuję model lokalnie: {LOCAL_MODEL_NAME}")
-            return pyc_load(LOCAL_MODEL_NAME)
-        except Exception as e:
-            st.warning(f"⚠️ Błąd ładowania lokalnego modelu: {str(e)}")
-            st.info("📥 Próbuję pobrać model z S3...")
-    
-    # Jeśli nie ma lokalnie, pobierz z S3
+            return joblib.load(LOCAL_PATH)
+        except Exception:
+            st.warning("⚠️ Lokalny model uszkodzony — pobieram z S3...")
+
+    # 2. Pobierz z S3
     model_path = download_model_from_s3()
-    
     if model_path is None:
-        st.error("❌ Nie udało się pobrać modelu z S3")
         return None
-    
+
     try:
-        print(f"✔ Wczytuję model z S3: {model_path}")
-        return pyc_load(model_path)
+        return joblib.load(model_path)
     except Exception as e:
         st.error(f"❌ Błąd ładowania modelu: {str(e)}")
         return None
@@ -140,26 +118,20 @@ def load_model():
 # =======================================
 def extract_data(text: str) -> dict:
     """
-    Wyłuskuje płeć, wiek i czas 5 km w sekundach za pomocą OpenAI + Langfuse.
+    Wyłuskuje płeć, wiek i czas 5 km za pomocą OpenAI + Langfuse.
     """
     if not text.strip():
         return {"sex": None, "age": None, "time_5km": None}
 
     system_prompt = """
     Extract running-related data from Polish text.
-    Return ONLY valid JSON object:
+    Return ONLY JSON:
 
     {
       "sex": "M" | "K" | null,
       "age": number | null,
       "time_5km": number | null
     }
-
-    Rules:
-    - If name ends with "a", use "K" unless exceptions: Kuba, Barnaba, Bonawentura, Kacper.
-    - Accept time formats: MM:SS or H:MM:SS or "12 min" → convert to seconds.
-    - Age must be 1–100.
-    - For "12 min" convert to 720 seconds (12 * 60).
     """
 
     try:
@@ -173,8 +145,7 @@ def extract_data(text: str) -> dict:
             temperature=0
         )
 
-        raw = response.choices[0].message.content
-        data = json.loads(raw)
+        data = json.loads(response.choices[0].message.content)
 
         # Walidacja
         if data.get("age") and not (1 <= data["age"] <= 100):
@@ -190,17 +161,14 @@ def extract_data(text: str) -> dict:
 
 
 # =======================================
-# 5. Prediction Logic
+# 5. Prediction Logic (sklearn)
 # =======================================
-def predict_time(sex: str, age: int, t5: float) -> tuple:
-    if not sex or not age or not t5:
-        raise ValueError("Brakuje danych wejściowych")
-
+def predict_time(sex: str, age: int, t5: float):
     model = load_model()
     if model is None:
-        raise ValueError("Model nie został wczytany poprawnie")
+        raise ValueError("Model nie został wczytany")
 
-    tempo = t5 / 5  # tempo na 1 km
+    tempo = t5 / 5
 
     df = pd.DataFrame([{
         "Płeć": sex,
@@ -211,207 +179,12 @@ def predict_time(sex: str, age: int, t5: float) -> tuple:
         "20 km Czas": tempo * 20
     }])
 
-    try:
-        pred = model.predict(df)[0]
-        return int(pred), tempo
-    except Exception as e:
-        raise ValueError(f"Błąd predykcji: {str(e)}")
+    pred = model.predict(df)[0]
+    return int(pred), tempo
 
 
 def format_time(sec: float) -> str:
     return str(datetime.timedelta(seconds=int(sec)))
 
 
-# =======================================
-# 6. STREAMLIT UI
-# =======================================
-st.set_page_config(
-    page_title="Predykcja Półmaratonu",
-    page_icon="🏃",
-    layout="centered"
-)
-
-st.title("🏃‍♂️ Predykcja Półmaratonu przez AI")
-st.write("Aplikacja przewiduje Twój czas półmaratonu na podstawie danych treningowych.")
-
-
-# ----- Session state -----
-if "extracted_data" not in st.session_state:
-    st.session_state.extracted_data = {"sex": None, "age": None, "time_5km": None}
-
-if "prediction_result" not in st.session_state:
-    st.session_state.prediction_result = None
-
-
-# =======================================
-# UI – Step 1: AI Extraction
-# =======================================
-st.subheader("📝 Krok 1: Wprowadź opis")
-
-user_text = st.text_area(
-    "Napisz coś o sobie:",
-    placeholder="Np. Mam 33 lata, jestem mężczyzną, biegam 5 km w 22:15.",
-    height=100,
-    help="AI automatycznie wyłuska dane z Twojego opisu"
-)
-
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    if st.button("🔎 Wyłuskaj dane AI", use_container_width=True):
-        if user_text.strip():
-            with st.spinner("Analizuję tekst..."):
-                extracted = extract_data(user_text)
-                st.session_state.extracted_data = extracted
-                
-                # Sprawdź które dane zostały znalezione
-                found_data = []
-                missing_data = []
-                
-                if extracted.get("sex"):
-                    found_data.append("płeć")
-                else:
-                    missing_data.append("płeć")
-                
-                if extracted.get("age"):
-                    found_data.append("wiek")
-                else:
-                    missing_data.append("wiek")
-                
-                if extracted.get("time_5km"):
-                    found_data.append("czas 5 km")
-                else:
-                    missing_data.append("czas 5 km")
-                
-                # Wyświetl odpowiedni komunikat
-                if len(found_data) == 3:
-                    st.success("✅ Wszystkie dane wyłuskane! Sprawdź i popraw poniżej jeśli trzeba.")
-                elif len(found_data) > 0:
-                    st.warning(f"⚠️ Znaleziono: **{', '.join(found_data)}**. Brakuje: **{', '.join(missing_data)}**. Uzupełnij ręcznie poniżej.")
-                else:
-                    st.error("❌ Nie znaleziono żadnych danych w tekście. Wprowadź je ręcznie poniżej.")
-                    st.info("💡 Spróbuj podać więcej informacji, np. 'Mam 30 lat, jestem mężczyzną, mój czas na 5 km to 22:15'")
-        else:
-            st.warning("Wprowadź najpierw tekst do analizy.")
-
-with col2:
-    if st.button("🔄 Wyczyść wszystko", use_container_width=True):
-        st.session_state.extracted_data = {"sex": None, "age": None, "time_5km": None}
-        st.session_state.prediction_result = None
-        st.rerun()
-
-
-# =======================================
-# UI – Step 2: Manual Input
-# =======================================
-st.divider()
-st.subheader("✏️ Krok 2: Dane wejściowe")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    sex_options = ["", "M", "K"]
-    current_sex = st.session_state.extracted_data.get("sex") or ""
-    sex_index = sex_options.index(current_sex) if current_sex in sex_options else 0
-    
-    sex = st.selectbox(
-        "Płeć:",
-        sex_options,
-        index=sex_index,
-        help="M - mężczyzna, K - kobieta"
-    )
-
-with col2:
-    default_age = st.session_state.extracted_data.get("age")
-    age = st.number_input(
-        "Wiek:",
-        min_value=0,
-        max_value=100,
-        value=int(default_age) if default_age else 0,
-        help="Twój wiek w latach",
-        placeholder="Podaj wiek"
-    )
-
-with col3:
-    default_t5 = st.session_state.extracted_data.get("time_5km")
-    t5 = st.number_input(
-        "Czas 5 km (sekundy):",
-        min_value=0,
-        max_value=5000,
-        value=int(default_t5) if default_t5 else 0,
-        help="Twój najlepszy czas na 5 km w sekundach (np. 1335 = 22:15)",
-        placeholder="Podaj czas w sekundach"
-    )
-
-if t5 > 0:
-    st.caption(f"💡 Czas 5 km: **{format_time(t5)}** (tempo: **{format_time(t5/5)}/km**)")
-
-
-# =======================================
-# UI – Step 3: Prediction
-# =======================================
-st.divider()
-st.subheader("🏁 Krok 3: Oblicz przewidywany czas")
-
-if st.button("🚀 Oblicz czas półmaratonu", type="primary", use_container_width=True):
-    if not sex or sex == "":
-        st.error("❌ Wybierz płeć!")
-    elif age <= 0:
-        st.error("❌ Podaj wiek (musi być większy niż 0)!")
-    elif t5 <= 0:
-        st.error("❌ Podaj czas 5 km (musi być większy niż 0)!")
-    elif t5 < 60:
-        st.error("❌ Czas 5 km jest zbyt krótki (minimum 60 sekund = 1 minuta)!")
-    else:
-        try:
-            with st.spinner("Pobieranie modelu i obliczanie predykcji..."):
-                predicted, tempo = predict_time(sex, age, t5)
-                st.session_state.prediction_result = {
-                    "time": format_time(predicted),
-                    "seconds": predicted,
-                    "tempo": tempo
-                }
-                st.balloons()
-        except Exception as e:
-            st.error(f"❌ Błąd podczas predykcji: {str(e)}")
-
-
-# =======================================
-# UI – Results
-# =======================================
-if st.session_state.prediction_result:
-    st.divider()
-    st.subheader("📊 Twój przewidywany wynik")
-    
-    result = st.session_state.prediction_result
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="Czas półmaratonu",
-            value=result["time"]
-        )
-    
-    with col2:
-        st.metric(
-            label="Tempo na km",
-            value=format_time(result["tempo"])
-        )
-    
-    with col3:
-        distance_km = 21.0975
-        avg_speed = (distance_km / result["seconds"]) * 3600
-        st.metric(
-            label="Średnia prędkość",
-            value=f"{avg_speed:.2f} km/h"
-        )
-    
-    st.info("💡 **Pamiętaj:** To tylko predykcja oparta na modelu. Rzeczywisty wynik może się różnić w zależności od treningu, warunków pogodowych i dnia startu!")
-
-
-# =======================================
-# Footer
-# =======================================
-st.divider()
-st.caption("🔗 Aplikacja wykorzystuje OpenAI, Langfuse, PyCaret i DigitalOcean Spaces (S3).")
+# =====================================
