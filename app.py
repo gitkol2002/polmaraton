@@ -85,31 +85,37 @@ def download_model_from_s3():
 
 
 # =======================================
-# 3. Load model (joblib + sklearn)
+# 3. Load Model (scikit-learn + joblib)
 # =======================================
 @st.cache_resource
 def load_model():
     """
-    Wczytuje model w formacie .joblib
+    Wczytuje model:
+    1. Najpierw próbuje z lokalnego katalogu ./models/
+    2. Jeśli nie ma lokalnie, pobiera z S3 i ładuje z .joblib
     """
-    LOCAL_PATH = "models/model_polmaraton_splity.joblib"
+    LOCAL_MODEL_PATH = "models/model_polmaraton_splity.joblib"
 
-    # 1. Najpierw próbuj wczytać lokalnie (repozytorium)
-    if os.path.exists(LOCAL_PATH):
+    # 1. Sprawdź lokalny model
+    if os.path.exists(LOCAL_MODEL_PATH):
         try:
-            return joblib.load(LOCAL_PATH)
-        except Exception:
-            st.warning("⚠️ Lokalny model uszkodzony — pobieram z S3...")
+            print(f"✔ Wczytuję model lokalnie: {LOCAL_MODEL_PATH}")
+            return joblib.load(LOCAL_MODEL_PATH)
+        except Exception as e:
+            st.warning(f"⚠️ Błąd wczytywania lokalnego modelu: {str(e)}")
+            st.info("📥 Próbuję pobrać model z S3...")
 
-    # 2. Pobierz z S3
-    model_path = download_model_from_s3()
-    if model_path is None:
+    # 2. Pobierz model z S3
+    s3_path = download_model_from_s3()
+    if s3_path is None:
+        st.error("❌ Nie udało się pobrać modelu z S3")
         return None
 
     try:
-        return joblib.load(model_path)
+        print(f"✔ Wczytuję model z S3: {s3_path}")
+        return joblib.load(s3_path)
     except Exception as e:
-        st.error(f"❌ Błąd ładowania modelu: {str(e)}")
+        st.error(f"❌ Błąd ładowania modelu z S3: {str(e)}")
         return None
 
 
