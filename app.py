@@ -187,4 +187,196 @@ def format_time(sec: float) -> str:
     return str(datetime.timedelta(seconds=int(sec)))
 
 
-# =====================================
+# =======================================
+# 6. STREAMLIT UI
+# =======================================
+st.set_page_config(
+    page_title="Predykcja Półmaratonu",
+    page_icon="🏃",
+    layout="centered"
+)
+
+st.title("🏃‍♂️ Predykcja Półmaratonu przez AI")
+st.write("Aplikacja przewiduje Twój czas półmaratonu na podstawie danych treningowych.")
+
+
+# ----- Session state -----
+if "extracted_data" not in st.session_state:
+    st.session_state.extracted_data = {"sex": None, "age": None, "time_5km": None}
+
+if "prediction_result" not in st.session_state:
+    st.session_state.prediction_result = None
+
+
+# =======================================
+# UI – Step 1: AI Extraction
+# =======================================
+st.subheader("📝 Krok 1: Wprowadź opis")
+
+user_text = st.text_area(
+    "Napisz coś o sobie:",
+    placeholder="Np. Mam 33 lata, jestem mężczyzną, biegam 5 km w 22:15.",
+    height=100,
+    help="AI automatycznie wyłuska dane z Twojego opisu"
+)
+
+col1, col2 = st.columns([1, 3])
+
+with col1:
+    if st.button("🔎 Wyłuskaj dane AI", use_container_width=True):
+        if user_text.strip():
+            with st.spinner("Analizuję tekst..."):
+                extracted = extract_data(user_text)
+                st.session_state.extracted_data = extracted
+                
+                # Sprawdź które dane zostały znalezione
+                found_data = []
+                missing_data = []
+                
+                if extracted.get("sex"):
+                    found_data.append("płeć")
+                else:
+                    missing_data.append("płeć")
+                
+                if extracted.get("age"):
+                    found_data.append("wiek")
+                else:
+                    missing_data.append("wiek")
+                
+                if extracted.get("time_5km"):
+                    found_data.append("czas 5 km")
+                else:
+                    missing_data.append("czas 5 km")
+                
+                # Wyświetl odpowiedni komunikat
+                if len(found_data) == 3:
+                    st.success("✅ Wszystkie dane wyłuskane! Sprawdź i popraw poniżej jeśli trzeba.")
+                elif len(found_data) > 0:
+                    st.warning(f"⚠️ Znaleziono: **{', '.join(found_data)}**. Brakuje: **{', '.join(missing_data)}**. Uzupełnij ręcznie poniżej.")
+                else:
+                    st.error("❌ Nie znaleziono żadnych danych w tekście. Wprowadź je ręcznie poniżej.")
+                    st.info("💡 Spróbuj podać więcej informacji, np. 'Mam 30 lat, jestem mężczyzną, mój czas na 5 km to 22:15'")
+        else:
+            st.warning("Wprowadź najpierw tekst do analizy.")
+
+with col2:
+    if st.button("🔄 Wyczyść wszystko", use_container_width=True):
+        st.session_state.extracted_data = {"sex": None, "age": None, "time_5km": None}
+        st.session_state.prediction_result = None
+        st.rerun()
+
+
+# =======================================
+# UI – Step 2: Manual Input
+# =======================================
+st.divider()
+st.subheader("✏️ Krok 2: Dane wejściowe")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    sex_options = ["", "M", "K"]
+    current_sex = st.session_state.extracted_data.get("sex") or ""
+    sex_index = sex_options.index(current_sex) if current_sex in sex_options else 0
+    
+    sex = st.selectbox(
+        "Płeć:",
+        sex_options,
+        index=sex_index,
+        help="M - mężczyzna, K - kobieta"
+    )
+
+with col2:
+    default_age = st.session_state.extracted_data.get("age")
+    age = st.number_input(
+        "Wiek:",
+        min_value=0,
+        max_value=100,
+        value=int(default_age) if default_age else 0,
+        help="Twój wiek w latach",
+        placeholder="Podaj wiek"
+    )
+
+with col3:
+    default_t5 = st.session_state.extracted_data.get("time_5km")
+    t5 = st.number_input(
+        "Czas 5 km (sekundy):",
+        min_value=0,
+        max_value=5000,
+        value=int(default_t5) if default_t5 else 0,
+        help="Twój najlepszy czas na 5 km w sekundach (np. 1335 = 22:15)",
+        placeholder="Podaj czas w sekundach"
+    )
+
+if t5 > 0:
+    st.caption(f"💡 Czas 5 km: **{format_time(t5)}** (tempo: **{format_time(t5/5)}/km**)")
+
+
+# =======================================
+# UI – Step 3: Prediction
+# =======================================
+st.divider()
+st.subheader("🏁 Krok 3: Oblicz przewidywany czas")
+
+if st.button("🚀 Oblicz czas półmaratonu", type="primary", use_container_width=True):
+    if not sex or sex == "":
+        st.error("❌ Wybierz płeć!")
+    elif age <= 0:
+        st.error("❌ Podaj wiek (musi być większy niż 0)!")
+    elif t5 <= 0:
+        st.error("❌ Podaj czas 5 km (musi być większy niż 0)!")
+    elif t5 < 60:
+        st.error("❌ Czas 5 km jest zbyt krótki (minimum 60 sekund = 1 minuta)!")
+    else:
+        try:
+            with st.spinner("Pobieranie modelu i obliczanie predykcji..."):
+                predicted, tempo = predict_time(sex, age, t5)
+                st.session_state.prediction_result = {
+                    "time": format_time(predicted),
+                    "seconds": predicted,
+                    "tempo": tempo
+                }
+                st.balloons()
+        except Exception as e:
+            st.error(f"❌ Błąd podczas predykcji: {str(e)}")
+
+
+# =======================================
+# UI – Results
+# =======================================
+if st.session_state.prediction_result:
+    st.divider()
+    st.subheader("📊 Twój przewidywany wynik")
+    
+    result = st.session_state.prediction_result
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="Czas półmaratonu",
+            value=result["time"]
+        )
+    
+    with col2:
+        st.metric(
+            label="Tempo na km",
+            value=format_time(result["tempo"])
+        )
+    
+    with col3:
+        distance_km = 21.0975
+        avg_speed = (distance_km / result["seconds"]) * 3600
+        st.metric(
+            label="Średnia prędkość",
+            value=f"{avg_speed:.2f} km/h"
+        )
+    
+    st.info("💡 **Pamiętaj:** To tylko predykcja oparta na modelu. Rzeczywisty wynik może się różnić w zależności od treningu, warunków pogodowych i dnia startu!")
+
+
+# =======================================
+# Footer
+# =======================================
+st.divider()
+st.caption("🔗 Aplikacja wykorzystuje OpenAI, Langfuse, PyCaret i DigitalOcean Spaces (S3).")
