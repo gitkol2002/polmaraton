@@ -6,6 +6,12 @@ import os
 import tempfile
 from dotenv import load_dotenv
 
+st.set_page_config(
+    page_title="Predykcja Półmaratonu",
+    page_icon="🏃",
+    layout="centered"
+)
+
 # ====== AI / Langfuse ======
 from langfuse import Langfuse
 from langfuse.openai import OpenAI as LangfuseOpenAI
