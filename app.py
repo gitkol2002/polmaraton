@@ -231,7 +231,8 @@ def extract_data(text: str) -> dict:
                 {"role": "user", "content": text}
             ],
             response_format={"type": "json_object"},
-            temperature=0
+            temperature=0,
+            timeout=25.0  # Dodany timeout 25s (bezpieczny margines przed 30s limitem platformy)
         )
 
         data = json.loads(response.choices[0].message.content)
@@ -284,7 +285,24 @@ def format_time(sec: float) -> str:
 
 
 # =======================================
-# 7. STREAMLIT UI
+# 7. Pre-load modelu przy starcie
+# =======================================
+# Załaduj model w tle przy starcie aplikacji, aby uniknąć timeoutów
+@st.cache_resource(show_spinner=False)
+def initialize_model():
+    """Inicjalizuje model przy starcie aplikacji"""
+    try:
+        return load_model()
+    except Exception as e:
+        st.error(f"Błąd inicjalizacji modelu: {e}")
+        return None
+
+# Inicjalizuj model w tle
+_ = initialize_model()
+
+
+# =======================================
+# 8. STREAMLIT UI
 # =======================================
 st.set_page_config(
     page_title="Predykcja Półmaratonu",
