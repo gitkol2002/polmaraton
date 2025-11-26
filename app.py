@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from langfuse import Langfuse
 from langfuse.openai import OpenAI as LangfuseOpenAI
 
-# ====== Model (scikit-learn + joblib zamiast PyCaret) ======
+# ====== Model (scikit-learn + joblib) ======
 import joblib
 
 # ====== S3 (DigitalOcean Spaces) ======
@@ -42,7 +42,7 @@ client = LangfuseOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # 1. DigitalOcean Spaces (S3)
 # =======================================
 BUCKET_NAME = "maraton"
-MODEL_S3_KEY = "models/model_polmaraton_splity.joblib"  # teraz .joblib
+MODEL_S3_KEY = "models/model_polmaraton_splity.pkl"  # ZMIENIONE z .joblib na .pkl
 
 s3 = boto3.client(
     "s3",
@@ -54,7 +54,39 @@ s3 = boto3.client(
 
 
 # =======================================
-# 2. Download Model from S3
+# 2. Sprawdź czy model istnieje w S3
+# =======================================
+def check_s3_model_exists():
+    """Sprawdza czy model istnieje w S3 i wyświetla dostępne pliki"""
+    try:
+        # Sprawdź czy konkretny plik istnieje
+        s3.head_object(Bucket=BUCKET_NAME, Key=MODEL_S3_KEY)
+        print(f"✔ Model znaleziony w S3: {MODEL_S3_KEY}")
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            print(f"❌ Model NIE ISTNIEJE w S3: {MODEL_S3_KEY}")
+            
+            # Wylistuj dostępne pliki w folderze models/
+            try:
+                print("📂 Dostępne pliki w bucket 'maraton/models/':")
+                response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix='models/')
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        print(f"  - {obj['Key']} ({obj['Size']} bytes)")
+                else:
+                    print("  (brak plików)")
+            except Exception as list_err:
+                print(f"❌ Nie można wylistować plików: {list_err}")
+            
+            return False
+        else:
+            print(f"❌ Błąd S3: {e}")
+            return False
+
+
+# =======================================
+# 3. Download Model from S3
 # =======================================
 def download_model_from_s3():
     """
@@ -66,41 +98,68 @@ def download_model_from_s3():
         local_model_dir = os.path.join(temp_dir, "models")
         os.makedirs(local_model_dir, exist_ok=True)
 
-        local_model_path = os.path.join(local_model_dir, "model_polmaraton_splity.joblib")
+        local_model_path = os.path.join(local_model_dir, "model_polmaraton_splity.pkl")
 
-        # jeśli już istnieje — nie pobieraj drugi raz
+        # Jeśli już istnieje — nie pobieraj drugi raz
         if os.path.exists(local_model_path):
-            print("✔ Model już istnieje lokalnie")
+            print(f"✔ Model już istnieje lokalnie: {local_model_path}")
             return local_model_path
 
-        print(f"📥 Pobieram model z S3: {BUCKET_NAME}/{MODEL_S3_KEY}")
-        s3.download_file(BUCKET_NAME, MODEL_S3_KEY, local_model_path)
-        print(f"✔ Model pobrany do: {local_model_path}")
+        # Sprawdź czy model istnieje w S3
+        if not check_s3_model_exists():
+            st.error(f"""
+            ❌ Model nie istnieje w S3!
+            
+            **Oczekiwana ścieżka:** `{BUCKET_NAME}/{MODEL_S3_KEY}`
+            
+            **Jak to naprawić:**
+            1. Wejdź do swojego DigitalOcean Spaces
+            2. Bucket: `{BUCKET_NAME}`
+            3. Upload model do folderu `models/` z nazwą `model_polmaraton_splity.pkl`
+            4. Lub sprawdź logs powyżej aby zobaczyć jakie pliki są dostępne
+            """)
+            return None
 
+        print(f"📥 Pobieram model z S3: {BUCKET_NAME}/{MODEL_S3_KEY}")
+        
+        # Pobierz z progressem
+        with st.spinner(f"Pobieranie modelu z S3... (może potrwać ~30s dla 154MB)"):
+            s3.download_file(BUCKET_NAME, MODEL_S3_KEY, local_model_path)
+        
+        print(f"✔ Model pobrany do: {local_model_path}")
+        st.success("✅ Model pobrany z S3!")
+        
         return local_model_path
 
+    except NoCredentialsError:
+        st.error("❌ Błąd: Brak credentials do S3. Sprawdź SPACES_KEY i SPACES_SECRET w .env")
+        return None
+    except ClientError as e:
+        st.error(f"❌ Błąd S3: {e.response['Error']['Message']}")
+        return None
     except Exception as e:
         st.error(f"❌ Błąd pobierania modelu: {str(e)}")
         return None
 
 
 # =======================================
-# 3. Load Model (scikit-learn + joblib)
+# 4. Load Model (scikit-learn + joblib)
 # =======================================
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_model():
     """
     Wczytuje model:
     1. Najpierw próbuje z lokalnego katalogu ./models/
     2. Jeśli nie ma lokalnie, pobiera z S3 i ładuje z .joblib
     """
-    LOCAL_MODEL_PATH = "models/model_polmaraton_splity.joblib"
+    LOCAL_MODEL_PATH = "models/model_polmaraton_splity.pkl"  # ZMIENIONE z .joblib na .pkl
 
-    # 1. Sprawdź lokalny model
+    # 1. Sprawdź lokalny model (dla developmentu)
     if os.path.exists(LOCAL_MODEL_PATH):
         try:
             print(f"✔ Wczytuję model lokalnie: {LOCAL_MODEL_PATH}")
-            return joblib.load(LOCAL_MODEL_PATH)
+            with st.spinner("Ładowanie modelu z plików lokalnych..."):
+                return joblib.load(LOCAL_MODEL_PATH)
         except Exception as e:
             st.warning(f"⚠️ Błąd wczytywania lokalnego modelu: {str(e)}")
             st.info("📥 Próbuję pobrać model z S3...")
@@ -108,19 +167,19 @@ def load_model():
     # 2. Pobierz model z S3
     s3_path = download_model_from_s3()
     if s3_path is None:
-        st.error("❌ Nie udało się pobrać modelu z S3")
         return None
 
     try:
         print(f"✔ Wczytuję model z S3: {s3_path}")
-        return joblib.load(s3_path)
+        with st.spinner("Ładowanie modelu..."):
+            return joblib.load(s3_path)
     except Exception as e:
-        st.error(f"❌ Błąd ładowania modelu z S3: {str(e)}")
+        st.error(f"❌ Błąd ładowania modelu: {str(e)}")
         return None
 
 
 # =======================================
-# 4. AI → Extract Running Data
+# 5. AI → Extract Running Data (POPRAWIONE)
 # =======================================
 def extract_data(text: str) -> dict:
     """
@@ -131,13 +190,37 @@ def extract_data(text: str) -> dict:
 
     system_prompt = """
     Extract running-related data from Polish text.
-    Return ONLY JSON:
+    Return ONLY valid JSON object:
 
     {
       "sex": "M" | "K" | null,
       "age": number | null,
       "time_5km": number | null
     }
+
+    IMPORTANT RULES:
+    1. SEX:
+       - If name ends with "a" → "K" (female)
+       - Exceptions (masculine): Kuba, Barnaba, Bonawentura, Kacper
+       - If masculine name or "mężczyzna" → "M"
+       - If unclear → null
+
+    2. AGE:
+       - Extract age in years (1-100)
+       - Words: "lat", "lata", "wiek"
+
+    3. TIME (5km):
+       - Format MM:SS → convert to seconds (e.g., "22:15" = 1335)
+       - Format H:MM:SS → convert to seconds (e.g., "1:22:15" = 4935)
+       - Format "X min" or "X minut" → X * 60 seconds
+       - Common mistake: "33:12" means 33 minutes 12 seconds = 1992 seconds (NOT 33 seconds!)
+       - Must be reasonable: 300-5000 seconds (5-83 minutes)
+
+    EXAMPLES:
+    - "22:15" → 1335 seconds (22*60 + 15)
+    - "33:12" → 1992 seconds (33*60 + 12)
+    - "25 min" → 1500 seconds (25*60)
+    - "1:05:30" → 3930 seconds (1*3600 + 5*60 + 30)
     """
 
     try:
@@ -156,8 +239,12 @@ def extract_data(text: str) -> dict:
         # Walidacja
         if data.get("age") and not (1 <= data["age"] <= 100):
             data["age"] = None
-        if data.get("time_5km") and not (60 <= data["time_5km"] <= 5000):
-            data["time_5km"] = None
+        if data.get("time_5km"):
+            t = data["time_5km"]
+            # Czas 5km powinien być między 5 a 83 minutami (300-5000 sekund)
+            if not (300 <= t <= 5000):
+                st.warning(f"⚠️ AI zwróciło nieprawidłowy czas: {t}s. Sprawdź i popraw ręcznie.")
+                data["time_5km"] = None
 
         return data
 
@@ -167,12 +254,12 @@ def extract_data(text: str) -> dict:
 
 
 # =======================================
-# 5. Prediction Logic (sklearn)
+# 6. Prediction Logic (sklearn)
 # =======================================
 def predict_time(sex: str, age: int, t5: float):
     model = load_model()
     if model is None:
-        raise ValueError("Model nie został wczytany")
+        raise ValueError("Model nie został wczytany. Sprawdź połączenie z S3 i dostępność modelu.")
 
     tempo = t5 / 5
 
@@ -185,8 +272,11 @@ def predict_time(sex: str, age: int, t5: float):
         "20 km Czas": tempo * 20
     }])
 
-    pred = model.predict(df)[0]
-    return int(pred), tempo
+    try:
+        pred = model.predict(df)[0]
+        return int(pred), tempo
+    except Exception as e:
+        raise ValueError(f"Błąd podczas predykcji modelu: {str(e)}")
 
 
 def format_time(sec: float) -> str:
@@ -194,7 +284,7 @@ def format_time(sec: float) -> str:
 
 
 # =======================================
-# 6. STREAMLIT UI
+# 7. STREAMLIT UI
 # =======================================
 st.set_page_config(
     page_title="Predykcja Półmaratonu",
@@ -221,7 +311,7 @@ st.subheader("📝 Krok 1: Wprowadź opis")
 
 user_text = st.text_area(
     "Napisz coś o sobie:",
-    placeholder="Np. Mam 33 lata, jestem mężczyzną, biegam 5 km w 22:15.",
+    placeholder="Np. Paweł, 33 lata, czas 5km: 22:15",
     height=100,
     help="AI automatycznie wyłuska dane z Twojego opisu"
 )
@@ -261,7 +351,7 @@ with col1:
                     st.warning(f"⚠️ Znaleziono: **{', '.join(found_data)}**. Brakuje: **{', '.join(missing_data)}**. Uzupełnij ręcznie poniżej.")
                 else:
                     st.error("❌ Nie znaleziono żadnych danych w tekście. Wprowadź je ręcznie poniżej.")
-                    st.info("💡 Spróbuj podać więcej informacji, np. 'Mam 30 lat, jestem mężczyzną, mój czas na 5 km to 22:15'")
+                    st.info("💡 Przykład: 'Paweł, 33 lata, biegam 5 km w 22:15'")
         else:
             st.warning("Wprowadź najpierw tekst do analizy.")
 
@@ -331,11 +421,11 @@ if st.button("🚀 Oblicz czas półmaratonu", type="primary", use_container_wid
         st.error("❌ Podaj wiek (musi być większy niż 0)!")
     elif t5 <= 0:
         st.error("❌ Podaj czas 5 km (musi być większy niż 0)!")
-    elif t5 < 60:
-        st.error("❌ Czas 5 km jest zbyt krótki (minimum 60 sekund = 1 minuta)!")
+    elif t5 < 300:
+        st.error("❌ Czas 5 km jest zbyt krótki (minimum 5 minut = 300 sekund)!")
     else:
         try:
-            with st.spinner("Pobieranie modelu i obliczanie predykcji..."):
+            with st.spinner("Obliczanie predykcji... (pierwsze uruchomienie może zająć ~30s - pobieranie modelu z S3)"):
                 predicted, tempo = predict_time(sex, age, t5)
                 st.session_state.prediction_result = {
                     "time": format_time(predicted),
@@ -345,6 +435,7 @@ if st.button("🚀 Oblicz czas półmaratonu", type="primary", use_container_wid
                 st.balloons()
         except Exception as e:
             st.error(f"❌ Błąd podczas predykcji: {str(e)}")
+            st.info("💡 Spróbuj odświeżyć stronę lub sprawdź czy model jest dostępny w S3")
 
 
 # =======================================
@@ -385,4 +476,10 @@ if st.session_state.prediction_result:
 # Footer
 # =======================================
 st.divider()
-st.caption("🔗 Aplikacja wykorzystuje OpenAI, Langfuse, PyCaret i DigitalOcean Spaces (S3).")
+st.caption("🔗 Aplikacja wykorzystuje OpenAI, Langfuse i DigitalOcean Spaces (S3).")
+
+# Debug info (tylko dla developmentu)
+with st.expander("🔧 Debug Info (dla deweloperów)"):
+    st.write(f"**Bucket:** {BUCKET_NAME}")
+    st.write(f"**Model S3 Key:** {MODEL_S3_KEY}")
+    st.write(f"**Model loaded:** {load_model() is not None}")
